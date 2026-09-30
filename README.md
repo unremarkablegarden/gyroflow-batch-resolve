@@ -4,13 +4,15 @@ Stabilise a whole card of Sigma fp + Atomos Ninja V ProRes RAW clips in DaVinci 
 
 ![Gyroflow Batch for Resolve: two clips matched to their gyro takes, one written with 5 sync points 2.6 ms apart, the second syncing](docs/screenshot.webp)
 
+Companion to [fpSup Gyro Base + HDMI](https://github.com/unremarkablegarden/fpSup/tree/gyro-hdmi), the fp firmware card that records the gyro logs this tool reads.
+
 The tool matches every recorder clip to the gyro log the camera wrote, corrects the camera's lens profile for the clip, runs Gyroflow's autosync, and writes `<clip>.gyroflow` next to each clip. The Gyroflow OFX plugin in Resolve picks those files up by name. No video is rendered.
 
 The `.gyroflow` files are ordinary Gyroflow projects with the gyro data embedded, so they work in any editor with a Gyroflow plugin: DaVinci Resolve, Final Cut Pro, Adobe Premiere Pro and After Effects, and other OpenFX hosts. They also open in the Gyroflow app itself for rendering there. The steps below are for Resolve; in other editors, load `<clip>.gyroflow` into the plugin as that editor's plugin documentation describes.
 
 ## What you need
 
-- A Sigma fp (firmware 5.02) running the fpSup Base build with the HDMI record hooks. It writes `H001_577.GYR` + `H001_577.json` to the SD card root for every take recorded to the Ninja.
+- A Sigma fp (firmware 5.02) running [fpSup Gyro Base + HDMI](https://github.com/unremarkablegarden/fpSup/tree/gyro-hdmi), the companion firmware card to this tool. It writes `H001_577.GYR` + `H001_577.json` to the SD card root for every take recorded to the Ninja.
 - [Gyroflow](https://github.com/gyroflow/gyroflow/releases) 1.6.3 or newer, the GitHub build. The Mac App Store build is sandboxed and its command line cannot read clips.
 - The Gyroflow OFX plugin for Resolve (installed from Gyroflow: Video editor plugins → OpenFX).
 - ffmpeg and ffprobe, version 8.0 or newer (first with a ProRes RAW decoder). macOS: `brew install ffmpeg`.
