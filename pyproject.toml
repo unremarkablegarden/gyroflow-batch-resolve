@@ -1,0 +1,23 @@
+[project]
+name = "gyroflow-batch-resolve"
+version = "0.1.0"
+description = "Match Sigma fp gyro logs to recorder clips and write the .gyroflow files the Gyroflow OFX plugin in DaVinci Resolve loads."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.26", "tkinterdnd2>=0.4"]
+
+[project.optional-dependencies]
+dev = ["pytest", "pyinstaller"]
+
+[project.scripts]
+gyroflow-batch = "gyroflow_batch_resolve.cli:main"
+
+[project.gui-scripts]
+gyroflow-batch-gui = "gyroflow_batch_resolve.gui:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["gyroflow_batch_resolve"]
