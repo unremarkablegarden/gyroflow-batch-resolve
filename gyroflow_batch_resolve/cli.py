@@ -55,7 +55,8 @@ def main(argv: list[str] | None = None) -> int:
             print(f"skip {clip.path.name}: no gyro data")
             no_gyro += 1
             continue
-        print(f"{clip.path.name}: {clip.take.path.name} from {clip.start_s:.2f} s (correlation {clip.corr:.2f})")
+        how = "timecode" if clip.method == "timecode" else f"correlation {clip.corr:.2f}"
+        print(f"{clip.path.name}: {clip.take.path.name} from {clip.start_s:.2f} s ({how})")
         if a.dry_run:
             continue
         print("     syncing in Gyroflow…", flush=True)
@@ -69,7 +70,7 @@ def main(argv: list[str] | None = None) -> int:
         spread = f"{offsets[-1] - offsets[0]:.1f}" if offsets else "n/a"
         print(f"ok   {clip.project.name}: sync offsets ms [{', '.join(f'{o:.1f}' for o in offsets)}], "
               f"spread {spread} ({time.monotonic() - started:.0f} s)")
-        warning = pipeline.sync_warning(offsets)
+        warning = pipeline.sync_warning(offsets, clip.method == "timecode")
         if warning:
             print(f"     check sync: {warning}")
             warned += 1

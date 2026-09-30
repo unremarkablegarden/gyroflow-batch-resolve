@@ -1,10 +1,12 @@
 """Match recorder clips to gyro takes and write a .gyroflow beside each clip.
 
 A take is `<name>.GYR` + `<name>.json` from the fpSup Base build with the HDMI
-hooks. A take and a clip do not start together when the recorder was stopped
-from its own screen (the camera keeps logging), so each clip is located inside
-the takes by cross-correlating the video's frame-to-frame motion with the
-gyro's angular rate.
+hooks. A take and a clip do not start together when the recorder was started
+or stopped from its own screen (the camera keeps logging), so each clip is
+located inside the takes: by timecode when the camera wrote one into the
+take's .json (the recorder stamps the same timecode on the clip), otherwise by
+cross-correlating the video's frame-to-frame motion with the gyro's angular
+rate.
 
 The .gyroflow is written by the Gyroflow CLI with the gyro data embedded
 (--export-project 2), so it needs no other file. The Gyroflow OFX plugin in
@@ -31,6 +33,15 @@ PROBE_W, PROBE_H = 96, 54
 # Below this the location is a guess. Real matches measured 0.84-0.97,
 # unrelated signals about 0.1.
 MIN_CORR = 0.5
+
+# Timecode placement.  The log opens at the REC or shutter press and the
+# recorder starts a few frames later or earlier, and a take log can end a few
+# frames before its clip; this much of the clip may fall outside the log.
+TC_SLACK_S = 0.5
+# Autosync's search around a timecode placement.  Measured: autosync moved
+# timecode-placed clips by -11 and +26 ms, inside one frame (42 ms at 24p);
+# 0.25 s leaves six frames of room and keeps autosync off unrelated motion.
+TC_SEARCH_S = 0.25
 
 # Gyroflow 1.6.3 reads autosync settings from the lens profile only; the CLI's
 # -s is not consulted. search_size is +/- seconds around the located start.
@@ -80,9 +91,12 @@ class Tools:
         return found
 
 
-def sync_warning(offsets: list[float]) -> str | None:
+def sync_warning(offsets: list[float], by_timecode: bool = False) -> str | None:
     if len(offsets) < 2:
-        return f"only {len(offsets)} sync point" + ("" if len(offsets) == 1 else "s")
+        msg = f"only {len(offsets)} sync point" + ("" if len(offsets) == 1 else "s")
+        if by_timecode:
+            msg += "; the timecode placement stands, within a frame"
+        return msg
     spread = offsets[-1] - offsets[0]
     if spread > SYNC_SPREAD_WARN_MS:
         return f"sync points {spread:.0f} ms apart"
@@ -94,6 +108,7 @@ class Take:
     path: Path
     lens: Path
     cap: gyr.Capture
+    tc: str | None = None       # the camera's timecode when the log opened
 
 
 @dataclass
@@ -107,6 +122,8 @@ class Clip:
     take: Take | None = None
     start_s: float = 0.0
     corr: float = 0.0
+    method: str = ""            # "timecode" or "motion", once located
+    tc: str | None = None       # the clip's start timecode, from the container
     status: str = "pending"
 
     @property
@@ -137,10 +154,28 @@ def find_takes(folder: Path, log: Callable[[str], None] = print) -> list[Take]:
             log(f"skip {p.name}: no {lens.name} beside it")
             continue
         try:
-            takes.append(Take(p, lens, gyr.read(p)))
+            takes.append(Take(p, lens, gyr.read(p), lens_timecode(lens)))
         except ValueError as e:
             log(f"skip {p.name}: {e}")
     return takes
+
+
+def lens_timecode(lens: Path) -> str | None:
+    try:
+        tc = json.loads(lens.read_text()).get("timecode")
+    except (OSError, ValueError, AttributeError):
+        return None
+    return tc if isinstance(tc, str) else None
+
+
+def tc_frames(tc: str, fps: float) -> int | None:
+    """HH:MM:SS:FF (or ;FF) as frames since midnight, counted at the nominal
+    rate: 24 for 23.976, 30 for 29.97.  Drop-frame is not handled."""
+    try:
+        h, m, sec, f = (int(x) for x in tc.replace(";", ":").split(":"))
+    except ValueError:
+        return None
+    return ((h * 60 + m) * 60 + sec) * round(fps) + f
 
 
 def find_clips(folder: Path, subfolders: bool = True) -> list[Clip]:
@@ -152,12 +187,16 @@ def find_clips(folder: Path, subfolders: bool = True) -> list[Clip]:
 def probe_info(clip: Clip, t: Tools) -> None:
     """Size, frame rate and duration from the container. Fast: nothing is decoded."""
     info = json.loads(tools.run([t.ffprobe, "-v", "error", "-select_streams", "v:0", "-print_format", "json",
-                                 "-show_entries", "stream=width,height,r_frame_rate:format=duration",
+                                 "-show_entries",
+                                 "stream=width,height,r_frame_rate:stream_tags=timecode"
+                                 ":format=duration:format_tags=timecode",
                                  clip.path]).stdout)
     stream = info["streams"][0]
     num, den = stream["r_frame_rate"].split("/")
     clip.width, clip.height, clip.fps = stream["width"], stream["height"], int(num) / int(den)
     clip.duration_s = float(info["format"]["duration"])
+    clip.tc = (stream.get("tags", {}).get("timecode")
+               or info["format"].get("tags", {}).get("timecode"))
 
 
 def probe_motion(clip: Clip, t: Tools) -> None:
@@ -178,6 +217,39 @@ def rate_per_frame(cap: gyr.Capture, fps: float) -> np.ndarray:
     edges = (np.arange(int(len(mag) / per) + 1) * per).astype(np.int64)
     sums = np.add.reduceat(mag, edges[:-1]) if len(edges) > 1 else np.array([])
     return sums / np.diff(edges)
+
+
+def locate_by_tc(clip: Clip, takes: list[Take]) -> bool:
+    """Place the clip from timecodes alone.  True if exactly one take holds it.
+
+    Needs the camera on Free Run: the take's timecode and the clip's then come
+    from one running clock, and one frame of timecode is one frame of time.
+    With Rec Run the timecode stands still between takes, several takes can
+    claim the clip, and it is left to motion matching."""
+    if not clip.tc or not clip.fps:
+        return False
+    c = tc_frames(clip.tc, clip.fps)
+    if c is None:
+        return False
+    day = 24 * 3600 * round(clip.fps)
+    hits = []
+    for take in takes:
+        k = tc_frames(take.tc, clip.fps) if take.tc else None
+        if k is None:
+            continue
+        d = (c - k) % day
+        if d > day // 2:
+            d -= day                    # the clip starts before the log (or past midnight)
+        off = d / clip.fps
+        if -TC_SLACK_S <= off and off + clip.duration_s <= take.cap.duration_s + TC_SLACK_S:
+            hits.append((take, off))
+    if len(hits) != 1:
+        return False
+    clip.take, off = hits[0]
+    # A negative start (the recorder started before the log opened) is kept:
+    # gyr.gcsv pads the gap, so the clip and the gyro stay aligned.
+    clip.start_s, clip.corr, clip.method = off, 1.0, "timecode"
+    return True
 
 
 def locate(clip: Clip, takes: list[Take]) -> None:
@@ -205,6 +277,7 @@ def locate(clip: Clip, takes: list[Take]) -> None:
         best = int(r.argmax())
         if r[best] > clip.corr:
             clip.take, clip.start_s, clip.corr = take, best / clip.fps, float(r[best])
+            clip.method = "motion"
 
 
 def match(clip: Clip, takes: list[Take], t: Tools, redo: bool = False,
@@ -218,6 +291,8 @@ def match(clip: Clip, takes: list[Take], t: Tools, redo: bool = False,
         return DONE
     step("reading")
     probe_info(clip, t)
+    if locate_by_tc(clip, takes):
+        return MATCHED
     # A log starts at the REC press and stops at the stop, so it is at least as
     # long as any clip inside it. 1 s of slack for container rounding.
     if not takes or clip.duration_s > max(k.cap.duration_s for k in takes) + 1.0:
@@ -248,7 +323,8 @@ def lens_for(clip: Clip, source: Path) -> dict:
         m[0][2], m[1][2] = w / 2, h / 2
     d["fps"] = clip.fps
     d["camera_setting"] = f"{w}x{h} @{clip.fps:.3f} HDMI RAW"
-    d["sync_settings"] = SYNC_SETTINGS
+    d["sync_settings"] = (dict(SYNC_SETTINGS, search_size=TC_SEARCH_S)
+                          if clip.method == "timecode" else SYNC_SETTINGS)
     return d
 
 

@@ -104,3 +104,58 @@ def test_find_clips_subfolders(tmp_path):
     names = lambda clips: [c.path.relative_to(tmp_path).as_posix() for c in clips]
     assert names(pipeline.find_clips(tmp_path)) == ["A.mov", "sub/B.MOV"]
     assert names(pipeline.find_clips(tmp_path, subfolders=False)) == ["A.mov"]
+
+
+def tc_take(duration_s, tc):
+    n = round(duration_s * 2499.466)
+    cap = gyr.parse(v8_take([(0, 0, 0)] * n), "H")
+    return pipeline.Take(Path("H.GYR"), Path("H.json"), cap, tc)
+
+
+def test_tc_frames_counts_at_the_nominal_rate():
+    assert pipeline.tc_frames("03:53:21:12", 24.0) == ((3 * 60 + 53) * 60 + 21) * 24 + 12
+    assert pipeline.tc_frames("00:00:01;00", 29.97) == 30
+    assert pipeline.tc_frames("garbage", 24.0) is None
+
+
+def test_locate_by_tc_picks_the_log_the_clip_started_in():
+    # An idle log, then the take log that the start press opened; the clip
+    # starts at the second log's timecode and runs 2 frames past its end.
+    idle = tc_take(9.35, "03:53:12:09")
+    take = tc_take(4.74, "03:53:21:12")
+    clip = pipeline.Clip(Path("T001.mov"), 3840, 2160, 24.0, duration_s=4.79, tc="03:53:21:12")
+    assert pipeline.locate_by_tc(clip, [idle, take])
+    assert clip.take is take and clip.start_s == 0.0 and clip.method == "timecode"
+
+
+def test_locate_by_tc_places_a_clip_inside_a_session_log():
+    log = tc_take(60.0, "10:00:00:00")
+    clip = pipeline.Clip(Path("c.mov"), 3840, 2160, 24.0, duration_s=5.0, tc="10:00:12:12")
+    assert pipeline.locate_by_tc(clip, [log])
+    assert abs(clip.start_s - 12.5) < 1e-9
+
+
+def test_locate_by_tc_leaves_ambiguous_or_missing_timecodes_to_motion():
+    # Rec Run: two logs opened at the same stopped timecode.
+    a, b = tc_take(10.0, "01:00:00:00"), tc_take(10.0, "01:00:00:00")
+    clip = pipeline.Clip(Path("c.mov"), 3840, 2160, 24.0, duration_s=3.0, tc="01:00:02:00")
+    assert not pipeline.locate_by_tc(clip, [a, b]) and clip.take is None
+    assert not pipeline.locate_by_tc(pipeline.Clip(Path("c.mov"), 3840, 2160, 24.0, duration_s=3.0),
+                                     [tc_take(10.0, None)])
+
+
+def test_gcsv_pads_a_clip_that_started_before_the_log():
+    cap = gyr.parse(v8_take([(5, 6, 7), (8, 9, 10)], accel_at=[(0, (1, 2, 3))]), "T")
+    lines = gyr.gcsv(cap, start_sample=-2).strip().split("\n")
+    body = lines[lines.index("t,gx,gy,gz,ax,ay,az") + 1:]
+    assert body == ["0,0,0,0,2,-1,3", "1,0,0,0,2,-1,3", "2,5,6,7,2,-1,3", "3,8,9,10,2,-1,3"]
+
+
+def test_timecode_placement_narrows_the_autosync_search(tmp_path):
+    src = tmp_path / "H.json"
+    src.write_text(json.dumps({"calib_dimension": {"w": 3840, "h": 2160}}))
+    clip = pipeline.Clip(Path("c.mov"), 3840, 2160, 24.0)
+    assert pipeline.lens_for(clip, src)["sync_settings"]["search_size"] == pipeline.SYNC_SETTINGS["search_size"]
+    clip.method = "timecode"
+    assert pipeline.lens_for(clip, src)["sync_settings"]["search_size"] == pipeline.TC_SEARCH_S
+    assert pipeline.SYNC_SETTINGS["search_size"] == 1.0      # the shared default is untouched

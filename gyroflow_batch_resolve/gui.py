@@ -71,20 +71,34 @@ class App:
                 ("Video source (recorder SSD)", self.video_dir, True),
                 ("Gyroflow executable (blank = auto)", self.gyroflow, False),
                 ("ffmpeg (blank = auto)", self.ffmpeg, False)]
+        # Refresh re-reads both folders and matches again, for a card or drive
+        # that was swapped or written to since the last match.
+        self.refresh_btns = []
         for i, (label, var, is_dir) in enumerate(rows):
             ttk.Label(frm, text=label).grid(row=i, column=0, sticky="w", pady=2)
             entry = ttk.Entry(frm, textvariable=var)
             entry.grid(row=i, column=1, sticky="ew", padx=6)
             ttk.Button(frm, text="Choose…", command=lambda v=var, d=is_dir: self.choose(v, d)).grid(row=i, column=2)
+            if i < 2:
+                btn = ttk.Button(frm, text="Refresh", command=self.match)
+                btn.grid(row=i, column=3, padx=(6, 0))
+                self.refresh_btns.append(btn)
             if TkinterDnD:
                 entry.drop_target_register(DND_FILES)
                 entry.dnd_bind("<<Drop>>", lambda e, v=var, d=is_dir: self.dropped(e, v, d))
 
         self.tool_status = ttk.Label(frm, text="")
-        self.tool_status.grid(row=4, column=0, columnspan=3, sticky="w", pady=(4, 0))
+        self.tool_status.grid(row=4, column=0, columnspan=4, sticky="w", pady=(4, 0))
 
+        # The list buttons are packed first, on the right, so a narrow window
+        # squeezes the left side and never cuts them off.
         bar = ttk.Frame(frm)
-        bar.grid(row=5, column=0, columnspan=3, sticky="w", pady=8)
+        bar.grid(row=5, column=0, columnspan=4, sticky="ew", pady=8)
+        listbar = ttk.Frame(bar)
+        listbar.pack(side="right")
+        self.remove_btn = ttk.Button(listbar, text="Remove from list", command=self.remove, state="disabled")
+        self.remove_btn.pack(side="left", padx=(12, 0))
+        ttk.Button(listbar, text="Clear list", command=self.clear).pack(side="left", padx=(6, 0))
         self.match_btn = ttk.Button(bar, text="1. Match clips", command=self.match)
         self.match_btn.pack(side="left")
         self.gen_btn = ttk.Button(bar, text="2. Write .gyroflow files", command=self.generate, state="disabled")
@@ -93,20 +107,17 @@ class App:
         self.cancel_btn.pack(side="left")
         ttk.Checkbutton(bar, text="Redo clips that are already done", variable=self.redo).pack(side="left", padx=12)
         ttk.Checkbutton(bar, text="Include subfolders", variable=self.subfolders).pack(side="left")
-        self.remove_btn = ttk.Button(bar, text="Remove from list", command=self.remove, state="disabled")
-        self.remove_btn.pack(side="left", padx=(12, 0))
-        ttk.Button(bar, text="Clear list", command=self.clear).pack(side="left", padx=6)
 
-        cols = ("clip", "length", "take", "start", "match", "status")
+        cols = ("clip", "length", "timecode", "take", "start", "match", "status")
         self.table = ttk.Treeview(frm, columns=cols, show="headings", height=12)
-        for c, title, w in zip(cols, ("Clip", "Length", "Gyro take", "Starts at", "Match", "Status"),
-                               (280, 60, 110, 80, 60, 400)):
+        for c, title, w in zip(cols, ("Clip", "Length", "Timecode", "Gyro take", "Starts at", "Match", "Status"),
+                               (280, 60, 90, 110, 80, 60, 400)):
             self.table.heading(c, text=title)
             self.table.column(c, width=w, anchor="w")
         self.table.tag_configure("failed", foreground="#b00020")
         self.table.tag_configure("warn", foreground="#b36b00")
         self.table.tag_configure("skipped", foreground="#777777")
-        self.table.grid(row=6, column=0, columnspan=3, sticky="nsew")
+        self.table.grid(row=6, column=0, columnspan=4, sticky="nsew")
         self.table.bind("<<TreeviewSelect>>", lambda e: self.update_remove_btn())
         for key in ("<Delete>", "<BackSpace>"):
             self.table.bind(key, lambda e: self.remove())
@@ -115,7 +126,7 @@ class App:
         # Progress: the activity bar moves whenever work is running, so a stuck
         # UI is visible; the counter bar and timer show where the run is.
         prog = ttk.Frame(frm)
-        prog.grid(row=7, column=0, columnspan=3, sticky="ew", pady=(8, 0))
+        prog.grid(row=7, column=0, columnspan=4, sticky="ew", pady=(8, 0))
         prog.columnconfigure(2, weight=1)
         self.activity = ttk.Progressbar(prog, mode="indeterminate", length=80)
         self.activity.grid(row=0, column=0)
@@ -125,11 +136,14 @@ class App:
         self.status.grid(row=0, column=2, sticky="w")
 
         self.log = tk.Text(frm, height=8, state="disabled")
-        self.log.grid(row=8, column=0, columnspan=3, sticky="nsew", pady=(8, 0))
+        self.log.grid(row=8, column=0, columnspan=4, sticky="nsew", pady=(8, 0))
         frm.rowconfigure(8, weight=1)
 
         if not TkinterDnD:
             self.write("Drag and drop is off (tkinterdnd2 not installed); use Choose….")
+        # No narrower than the rows above the table need.
+        root.update_idletasks()
+        root.minsize(frm.winfo_reqwidth(), 480)
         root.after(100, self.pump)
         self.check_tools()
 
@@ -170,9 +184,10 @@ class App:
         d = clip.duration_s
         values = (name,
                   f"{int(d // 60)}:{int(d % 60):02d}" if d else "",
+                  clip.tc or "",
                   clip.take.path.name if clip.take else "",
                   f"{clip.start_s:.2f} s" if clip.take else "",
-                  f"{clip.corr:.2f}" if clip.take else "",
+                  ("TC" if clip.method == "timecode" else f"{clip.corr:.2f}") if clip.take else "",
                   clip.status)
         tag = ("failed" if clip.status.startswith(("failed", "cancelled")) else
                "warn" if "check sync" in clip.status else
@@ -237,6 +252,8 @@ class App:
         self.current = None
         tools.reset_cancel()
         self.match_btn.configure(state="disabled")
+        for btn in self.refresh_btns:
+            btn.configure(state="disabled")
         self.gen_btn.configure(state="disabled")
         self.cancel_btn.configure(state="normal")
         self.activity.start(15)
@@ -268,6 +285,8 @@ class App:
         if summary:
             self.write(summary)
         self.match_btn.configure(state="normal")
+        for btn in self.refresh_btns:
+            btn.configure(state="normal")
         self.cancel_btn.configure(state="disabled")
         self.update_gen_btn()
 
@@ -340,7 +359,7 @@ class App:
                 else:
                     if state == pipeline.DONE:
                         # match() skips the container read for done clips; read it
-                        # here for the Length column only.
+                        # here for the Length and Timecode columns only.
                         try:
                             pipeline.probe_info(clip, t)
                         except CLIP_ERRORS:
@@ -378,7 +397,7 @@ class App:
                 else:
                     spread = f"{offsets[-1] - offsets[0]:.1f} ms" if offsets else "n/a"
                     clip.status = f"written, {len(offsets)} sync points, spread {spread}"
-                    warning = pipeline.sync_warning(offsets)
+                    warning = pipeline.sync_warning(offsets, clip.method == "timecode")
                     if warning:
                         clip.status = f"written, check sync: {warning}"
                         warned += 1

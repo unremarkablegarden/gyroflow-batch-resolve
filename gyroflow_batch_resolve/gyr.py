@@ -82,6 +82,10 @@ def read(path: Path) -> Capture:
 def gcsv(cap: Capture, start_sample: int = 0) -> str:
     """The .gcsv for the samples from `start_sample` on, with t restarting at 0.
 
+    A negative `start_sample` puts that many zero-rate samples first, holding
+    the first accelerometer reading, so t = 0 is still the clip's first frame
+    when the clip started before the log did.
+
     The text matches the fpSup converter's, which matches what the gcsv edition
     writes on the camera."""
     head = [
@@ -95,8 +99,9 @@ def gcsv(cap: Capture, start_sample: int = 0) -> str:
         f"tscale,{cap.period_s:.12g}",
         f"gscale,{cap.gscale:.12g}",
     ]
+    pad = max(0, -start_sample)
     start = max(0, min(start_sample, len(cap.gyro)))
-    g = cap.gyro[start:].astype(np.int64)
+    g = np.vstack([np.zeros((pad, 3), np.int64), cap.gyro[start:].astype(np.int64)])
     t = np.arange(len(g))[:, None]
     if len(cap.accel):
         head += [f"ascale,{cap.ascale:.12g}", "t,gx,gy,gz,ax,ay,az"]
@@ -104,6 +109,7 @@ def gcsv(cap: Capture, start_sample: int = 0) -> str:
         # The accelerometer axes differ from the gyro's and gcsv carries one
         # orientation for both, so (x, y) becomes (y, -x), as in the converter.
         idx = np.searchsorted(cap.accel_after, np.arange(start, len(cap.gyro)), side="right") - 1
+        idx = np.concatenate([np.full(pad, -1), idx])
         a = cap.accel[np.clip(idx, 0, None)].astype(np.int64)
         rows = np.hstack([t, g, a[:, 1:2], -a[:, 0:1], a[:, 2:3]])
     else:
