@@ -1,4 +1,4 @@
-# gyroflow-batch-resolve
+# Gyroflow Batch Resolve
 
 Batch your clips to Gyroflow: match each clip to its gyro log, sync it, and write a `.gyroflow` project file beside it, ready for the Gyroflow plugin in any video editor that supports it (DaVinci Resolve, Final Cut Pro, Premiere Pro, After Effects and other OpenFX hosts). No setting up clip by clip, and no video is rendered.
 
