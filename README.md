@@ -29,9 +29,10 @@ The `.gyroflow` files are ordinary Gyroflow projects with the gyro data embedded
 Run **Gyroflow Batch Resolve**.
 
 1. Gyro source: the SD card (or a copy of its `.GYR` and `.json` files).
-2. Video source: the Ninja SSD (or the folder you copied the clips to). Searched recursively.
-3. **1. Match clips**: reads each clip and finds its place in the gyro logs. The Match column is a correlation from 0 to 1; below 0.5 the clip is left out.
-4. **2. Write .gyroflow files**: runs Gyroflow for each matched clip. The Status column shows the sync points and their spread. A spread of a few ms is a good sync; hundreds of ms means it did not lock.
+2. Video source: the Ninja SSD (or the folder you copied the clips to). Subfolders are searched too; untick **Include subfolders** to read only the clips in that folder. Clips in a subfolder are listed with their path.
+3. **1. Match clips**: reads each clip and finds its place in the gyro logs. The Length column shows the clip duration. The Match column is a correlation from 0 to 1; below 0.5 the clip is left out.
+4. Optional: select clips and press **Remove from list** (or Delete) to leave them out of the run, or **Clear list** to remove all. The files are not touched.
+5. **2. Write .gyroflow files**: runs Gyroflow for each matched clip. The Status column shows the sync points and their spread. A spread of a few ms is a good sync; hundreds of ms means it did not lock.
 
 Re-running on the same card only does the new clips: a clip whose `.gyroflow` already holds sync points is marked "already done" without being read (tick "Redo clips that are already done" to redo them). A `.gyroflow` without sync points, left by an interrupted run, is redone. Clips with no gyro data (longer than every log, or matching none) are skipped, not failed.
 
@@ -56,7 +57,7 @@ gyroflow-batch /Volumes/NINJA --gyro /Volumes/SigmaFP --dry-run
 gyroflow-batch /Volumes/NINJA --gyro /Volumes/SigmaFP
 ```
 
-Same skipping rules as the app. `--force` redoes clips that are already done. `--gyroflow`, `--ffmpeg` and `--ffprobe` set tool paths when they are not found on their own.
+Same skipping rules as the app. `--force` redoes clips that are already done. `--no-subfolders` reads only the clips in the video folder itself. `--gyroflow`, `--ffmpeg` and `--ffprobe` set tool paths when they are not found on their own.
 
 ## In DaVinci Resolve
 

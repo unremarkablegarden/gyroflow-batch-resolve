@@ -44,6 +44,11 @@ class App:
         self.root = root
         self.cfg = load_config()
         self.clips: list[pipeline.Clip] = []
+        # Clips taken off the list by hand. A running worker skips them and
+        # their late updates are not shown.
+        self.removed: set[Path] = set()
+        # Video source of the last match; clip names are shown relative to it.
+        self.video_root = Path()
         self.events: queue.Queue = queue.Queue()
         self.busy = False
         # What the worker is on, for the status line: (index, total, clip, step, started).
@@ -60,6 +65,7 @@ class App:
         self.gyroflow = tk.StringVar(value=self.cfg.get("gyroflow", ""))
         self.ffmpeg = tk.StringVar(value=self.cfg.get("ffmpeg", ""))
         self.redo = tk.BooleanVar(value=False)
+        self.subfolders = tk.BooleanVar(value=self.cfg.get("subfolders", True))
 
         rows = [("Gyro source (SD card)", self.gyro_dir, True),
                 ("Video source (recorder SSD)", self.video_dir, True),
@@ -86,16 +92,24 @@ class App:
         self.cancel_btn = ttk.Button(bar, text="Cancel", command=self.cancel, state="disabled")
         self.cancel_btn.pack(side="left")
         ttk.Checkbutton(bar, text="Redo clips that are already done", variable=self.redo).pack(side="left", padx=12)
+        ttk.Checkbutton(bar, text="Include subfolders", variable=self.subfolders).pack(side="left")
+        self.remove_btn = ttk.Button(bar, text="Remove from list", command=self.remove, state="disabled")
+        self.remove_btn.pack(side="left", padx=(12, 0))
+        ttk.Button(bar, text="Clear list", command=self.clear).pack(side="left", padx=6)
 
-        cols = ("clip", "take", "start", "match", "status")
+        cols = ("clip", "length", "take", "start", "match", "status")
         self.table = ttk.Treeview(frm, columns=cols, show="headings", height=12)
-        for c, title, w in zip(cols, ("Clip", "Gyro take", "Starts at", "Match", "Status"), (250, 110, 80, 60, 460)):
+        for c, title, w in zip(cols, ("Clip", "Length", "Gyro take", "Starts at", "Match", "Status"),
+                               (280, 60, 110, 80, 60, 400)):
             self.table.heading(c, text=title)
             self.table.column(c, width=w, anchor="w")
         self.table.tag_configure("failed", foreground="#b00020")
         self.table.tag_configure("warn", foreground="#b36b00")
         self.table.tag_configure("skipped", foreground="#777777")
         self.table.grid(row=6, column=0, columnspan=3, sticky="nsew")
+        self.table.bind("<<TreeviewSelect>>", lambda e: self.update_remove_btn())
+        for key in ("<Delete>", "<BackSpace>"):
+            self.table.bind(key, lambda e: self.remove())
         frm.rowconfigure(6, weight=3)
 
         # Progress: the activity bar moves whenever work is running, so a stuck
@@ -147,7 +161,15 @@ class App:
         self.log.configure(state="disabled")
 
     def show(self, clip: pipeline.Clip) -> None:
-        values = (clip.path.name,
+        if clip.path in self.removed:
+            return
+        try:
+            name = str(clip.path.relative_to(self.video_root))
+        except ValueError:
+            name = clip.path.name
+        d = clip.duration_s
+        values = (name,
+                  f"{int(d // 60)}:{int(d % 60):02d}" if d else "",
                   clip.take.path.name if clip.take else "",
                   f"{clip.start_s:.2f} s" if clip.take else "",
                   f"{clip.corr:.2f}" if clip.take else "",
@@ -161,6 +183,29 @@ class App:
         else:
             self.table.insert("", "end", iid=iid, values=values, tags=(tag,))
         self.table.see(iid)
+
+    def remove(self, iids=None) -> None:
+        """Take clips off the job list, the selected ones by default. Files on
+        disk are not touched."""
+        iids = self.table.selection() if iids is None else iids
+        if not iids:
+            return
+        self.removed.update(Path(iid) for iid in iids)
+        self.clips = [c for c in self.clips if c.path not in self.removed]
+        self.table.delete(*iids)
+        if not self.busy:
+            self.update_gen_btn()
+        self.update_remove_btn()
+
+    def clear(self) -> None:
+        self.remove(self.table.get_children())
+
+    def update_remove_btn(self) -> None:
+        self.remove_btn.configure(state="normal" if self.table.selection() else "disabled")
+
+    def update_gen_btn(self) -> None:
+        ready = any(c.status == "matched" for c in self.clips)
+        self.gen_btn.configure(state="normal" if ready else "disabled")
 
     def pump(self) -> None:
         # Worker threads never touch Tk; they post here.
@@ -198,7 +243,7 @@ class App:
         self.counter.configure(value=0)
         self.status.configure(text=label)
         self.cfg.update(gyro_dir=self.gyro_dir.get(), video_dir=self.video_dir.get(),
-                        gyroflow=self.gyroflow.get(), ffmpeg=self.ffmpeg.get())
+                        gyroflow=self.gyroflow.get(), ffmpeg=self.ffmpeg.get(), subfolders=self.subfolders.get())
         save_config(self.cfg)
 
         def run():
@@ -224,8 +269,7 @@ class App:
             self.write(summary)
         self.match_btn.configure(state="normal")
         self.cancel_btn.configure(state="disabled")
-        ready = any(c.status == "matched" for c in self.clips)
-        self.gen_btn.configure(state="normal" if ready else "disabled")
+        self.update_gen_btn()
 
     def cancel(self) -> None:
         self.status.configure(text="Cancelling…")
@@ -260,22 +304,28 @@ class App:
                 self.write(f"{name} is not a folder that exists: {d}")
                 return
         self.table.delete(*self.table.get_children())
+        self.update_remove_btn()
+        self.removed.clear()
+        self.video_root = video_dir
         self.check_tools()
-        redo = self.redo.get()
+        redo, subfolders = self.redo.get(), self.subfolders.get()
 
         def work():
             t = self.find_tools()
             post = lambda s: self.events.put(("log", s))
             takes = pipeline.find_takes(gyro_dir, post)
-            self.clips = pipeline.find_clips(video_dir)
-            post(f"{len(takes)} gyro takes, {len(self.clips)} clips")
+            clips = pipeline.find_clips(video_dir, subfolders)
+            self.clips = list(clips)
+            post(f"{len(takes)} gyro takes, {len(clips)} clips")
             if not takes:
                 post("No .GYR + .json pairs in the gyro source.")
-            for clip in self.clips:
+            for clip in clips:
                 self.events.put(("clip", clip))
-            total = len(self.clips)
-            for i, clip in enumerate(self.clips, 1):
+            total = len(clips)
+            for i, clip in enumerate(clips, 1):
                 tools.check_cancel()
+                if clip.path in self.removed:
+                    continue
                 step = lambda s, i=i, c=clip: self.events.put(("step", (i, total, c.path.name, s)))
                 step("checking")
                 try:
@@ -288,6 +338,13 @@ class App:
                     clip.take = None
                     clip.status = f"failed: {e}"
                 else:
+                    if state == pipeline.DONE:
+                        # match() skips the container read for done clips; read it
+                        # here for the Length column only.
+                        try:
+                            pipeline.probe_info(clip, t)
+                        except CLIP_ERRORS:
+                            pass
                     clip.status = {pipeline.DONE: "already done", pipeline.NO_GYRO: "skipped: no gyro data",
                                    pipeline.MATCHED: "matched"}[state]
                 self.events.put(("clip", clip))
@@ -304,6 +361,8 @@ class App:
             written = warned = failed = 0
             for i, clip in enumerate(todo, 1):
                 tools.check_cancel()
+                if clip.path in self.removed:
+                    continue
                 self.events.put(("step", (i, len(todo), clip.path.name, "syncing in Gyroflow")))
                 clip.status = "syncing in Gyroflow…"
                 self.events.put(("clip", clip))

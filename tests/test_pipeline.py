@@ -95,3 +95,12 @@ def test_cancel_kills_a_running_process():
         tools.run([sys.executable, "-c", "pass"])
     tools.reset_cancel()
     assert tools.run([sys.executable, "-c", "pass"]).returncode == 0
+
+
+def test_find_clips_subfolders(tmp_path):
+    (tmp_path / "sub").mkdir()
+    for name in ("A.mov", "._A.mov", "notes.txt", "sub/B.MOV"):
+        (tmp_path / name).touch()
+    names = lambda clips: [c.path.relative_to(tmp_path).as_posix() for c in clips]
+    assert names(pipeline.find_clips(tmp_path)) == ["A.mov", "sub/B.MOV"]
+    assert names(pipeline.find_clips(tmp_path, subfolders=False)) == ["A.mov"]

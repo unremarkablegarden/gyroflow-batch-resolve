@@ -143,8 +143,9 @@ def find_takes(folder: Path, log: Callable[[str], None] = print) -> list[Take]:
     return takes
 
 
-def find_clips(folder: Path) -> list[Clip]:
-    return [Clip(p) for p in sorted(folder.rglob("*"))
+def find_clips(folder: Path, subfolders: bool = True) -> list[Clip]:
+    found = folder.rglob("*") if subfolders else folder.glob("*")
+    return [Clip(p) for p in sorted(found)
             if p.suffix.lower() in VIDEO_EXTS and not p.name.startswith("._")]
 
 

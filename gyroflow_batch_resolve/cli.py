@@ -1,6 +1,6 @@
 """Command line: match and generate in one run.
 
-    gyroflow-batch VIDEO_FOLDER --gyro GYRO_FOLDER [--dry-run] [--force]
+    gyroflow-batch VIDEO_FOLDER --gyro GYRO_FOLDER [--dry-run] [--force] [--no-subfolders]
 """
 
 from __future__ import annotations
@@ -15,10 +15,11 @@ from . import pipeline, tools
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="gyroflow-batch", description=pipeline.__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("videos", type=Path, help="folder with the recorder clips (searched recursively)")
+    ap.add_argument("videos", type=Path, help="folder with the recorder clips (subfolders included unless --no-subfolders)")
     ap.add_argument("--gyro", type=Path, required=True, help="folder with the .GYR + .json takes")
     ap.add_argument("--dry-run", action="store_true", help="match only, write nothing")
     ap.add_argument("--force", action="store_true", help="redo clips that already have a synced .gyroflow")
+    ap.add_argument("--no-subfolders", action="store_true", help="read clips from the video folder only, not its subfolders")
     ap.add_argument("--gyroflow", help="path to the Gyroflow executable")
     ap.add_argument("--ffmpeg", help="path to ffmpeg")
     ap.add_argument("--ffprobe", help="path to ffprobe")
@@ -34,7 +35,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     takes = pipeline.find_takes(a.gyro)
-    clips = pipeline.find_clips(a.videos)
+    clips = pipeline.find_clips(a.videos, subfolders=not a.no_subfolders)
     print(f"{len(takes)} gyro takes, {len(clips)} clips")
 
     done = already = no_gyro = failed = warned = 0
