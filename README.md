@@ -2,7 +2,7 @@
 
 Batch your clips to Gyroflow: match each clip to its gyro log, sync it, and write a `.gyroflow` project file beside it, ready for the Gyroflow plugin in any video editor that supports it (DaVinci Resolve, Final Cut Pro, Premiere Pro, After Effects and other OpenFX hosts). No setting up clip by clip, and no video is rendered.
 
-> Tested so far only with a SIGMA fp running [fpSup Gyro Base + HDMI](https://github.com/unremarkablegarden/fpSup/tree/gyro-hdmi), an Atomos Ninja V and DaVinci Resolve. The tool reads that card's gyro logs.
+> Tested so far only with a SIGMA fp running [fpSup Gyro Base + HDMI](https://github.com/unremarkablegarden/fpSup/tree/gyro-hdmi), an Atomos Ninja V and DaVinci Resolve.
 
 ![Gyroflow Batch for Resolve: four clips placed in their gyro takes by timecode, two written with 5 sync points 5.7 and 6.2 ms apart, the third syncing](docs/screenshot.webp)
 
