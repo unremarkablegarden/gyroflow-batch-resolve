@@ -1,27 +1,27 @@
 # gyroflow-batch-resolve
 
-Stabilise a whole card of Sigma fp + Atomos Ninja V ProRes RAW clips in DaVinci Resolve with Gyroflow, without setting up each clip by hand.
+Batch your clips to Gyroflow: match each clip to its gyro log, sync it, and write a `.gyroflow` project file beside it, ready for the Gyroflow plugin in any video editor that supports it (DaVinci Resolve, Final Cut Pro, Premiere Pro, After Effects and other OpenFX hosts). No setting up clip by clip, and no video is rendered.
+
+> Tested so far only with a SIGMA fp running [fpSup Gyro Base + HDMI](https://github.com/unremarkablegarden/fpSup/tree/gyro-hdmi), an Atomos Ninja V and DaVinci Resolve. The tool reads that card's gyro logs.
 
 ![Gyroflow Batch for Resolve: four clips placed in their gyro takes by timecode, two written with 5 sync points 5.7 and 6.2 ms apart, the third syncing](docs/screenshot.webp)
 
-Companion to [fpSup Gyro Base + HDMI](https://github.com/unremarkablegarden/fpSup/tree/gyro-hdmi), the fp firmware card that records the gyro logs this tool reads.
-
-The tool matches every recorder clip to the gyro log the camera wrote, corrects the camera's lens profile for the clip, runs Gyroflow's autosync, and writes `<clip>.gyroflow` next to each clip. The Gyroflow OFX plugin in Resolve picks those files up by name. No video is rendered.
-
-The `.gyroflow` files are ordinary Gyroflow projects with the gyro data embedded, so they work in any editor with a Gyroflow plugin: DaVinci Resolve, Final Cut Pro, Adobe Premiere Pro and After Effects, and other OpenFX hosts. They also open in the Gyroflow app itself for rendering there. The steps below are for Resolve; in other editors, load `<clip>.gyroflow` into the plugin as that editor's plugin documentation describes.
+The `.gyroflow` files are ordinary Gyroflow projects with the gyro data embedded: they need no other file and also open in the Gyroflow app.
 
 ## What you need
 
-- A Sigma fp (firmware 5.02) running [fpSup Gyro Base + HDMI](https://github.com/unremarkablegarden/fpSup/tree/gyro-hdmi), the companion firmware card to this tool. With the Ninja attached, every REC or shutter press on the fp starts a new log, `H001_577.GYR` + `H001_577.json`, in `gyro_data` on the SD card (or its root when the folder is missing). The `.json` carries the camera's timecode and focal length when the log opened.
+- A SIGMA fp (firmware 5.02) running [fpSup Gyro Base + HDMI](https://github.com/unremarkablegarden/fpSup/tree/gyro-hdmi). It writes a gyro log and lens profile (`H001_577.GYR` + `.json`) for every take recorded to the Ninja.
 - [Gyroflow](https://github.com/gyroflow/gyroflow/releases) 1.6.3 or newer, the GitHub build. The Mac App Store build is sandboxed and its command line cannot read clips.
-- The Gyroflow OFX plugin for Resolve (installed from Gyroflow: Video editor plugins → OpenFX).
-- ffmpeg and ffprobe, version 8.0 or newer (first with a ProRes RAW decoder). macOS: `brew install ffmpeg`.
+- The Gyroflow plugin for your editor, installed from Gyroflow (Video editor plugins).
+- ffmpeg and ffprobe 8.0 or newer (the first with a ProRes RAW decoder). macOS: `brew install ffmpeg`.
+
+There is no packaged release yet: build the app as described under [Build](#build). It has been used on macOS; the build also runs on Windows and Linux.
 
 ## Shooting
 
-- Set the fp's timecode to **Free Run**. The tool then places each clip in its log by timecode, which is exact to a frame and needs no camera motion. With Rec Run the timecode stands still between takes and the tool falls back to motion matching.
-- Start and stop recording with REC or the shutter button on the fp. Each press starts a new log, so each take gets its own log and lens profile. REC on the Ninja's screen does not reach the camera; the tool still finds such a clip inside whichever log was running.
-- Motion matching and Gyroflow's autosync need some camera motion. A locked-off tripod shot has nothing to stabilise anyway.
+- Set the fp's timecode to **Free Run**. Each clip is then placed in its log by timecode: exact to a frame, and no camera motion needed. With Rec Run the tool falls back to matching by motion.
+- Start and stop takes with REC or the shutter button on the fp, so each take gets its own log and lens profile. A take started from the Ninja's screen is still found, inside whichever log was running.
+- Gyroflow's autosync needs some camera motion. A locked-off tripod shot has nothing to stabilise anyway.
 
 ## Use
 
@@ -29,13 +29,13 @@ The `.gyroflow` files are ordinary Gyroflow projects with the gyro data embedded
 
 Run **Gyroflow Batch Resolve**.
 
-1. Gyro source: the SD card (or a copy of its `.GYR` and `.json` files).
+1. Gyro source: the SD card, or its `gyro_data` folder (or a copy of the `.GYR` and `.json` files).
 2. Video source: the Ninja SSD (or the folder you copied the clips to). Subfolders are searched too; untick **Include subfolders** to read only the clips in that folder. Clips in a subfolder are listed with their path.
-3. **1. Match clips**: reads each clip and finds its place in the gyro logs. The Length column shows the clip duration and Timecode its start timecode. The Match column shows `TC` for a clip placed by timecode, otherwise a correlation from 0 to 1; below 0.5 the clip is left out.
+3. **1. Match clips**: reads each clip and finds its place in the gyro logs. **Refresh** next to either folder does the same after you swap a card or add clips. The Length column shows the clip duration and Timecode its start timecode. The Match column shows `TC` for a clip placed by timecode, otherwise a correlation from 0 to 1; below 0.5 the clip is left out.
 4. Optional: select clips and press **Remove from list** (or Delete) to leave them out of the run, or **Clear list** to remove all. The files are not touched.
 5. **2. Write .gyroflow files**: runs Gyroflow for each matched clip. The Status column shows the sync points and their spread. A spread of a few ms is a good sync; hundreds of ms means it did not lock.
 
-Re-running on the same card only does the new clips: a clip whose `.gyroflow` already holds sync points is marked "already done" without being read (tick "Redo clips that are already done" to redo them). A `.gyroflow` without sync points, left by an interrupted run, is redone. Clips with no gyro data (no log holds their timecode, and they are longer than every log or match none by motion) are skipped, not failed.
+Re-running on the same card only does the new clips: a clip whose `.gyroflow` already holds sync points is marked "already done" without being read (tick "Redo clips that are already done" to redo them). A `.gyroflow` without sync points, left by an interrupted run, is redone. Clips no log can be found for are skipped, not failed.
 
 Folders can be dragged onto the path fields. Folder and tool paths are remembered in `~/.gyroflow-batch-resolve.json`.
 
@@ -62,6 +62,8 @@ Same skipping rules as the app. `--force` redoes clips that are already done. `-
 
 ## In DaVinci Resolve
 
+In other editors, load `<clip>.gyroflow` into the Gyroflow plugin as that editor's plugin documentation describes.
+
 The plugin reads the file path of the clip it sits on and loads `<clip name>.gyroflow` from the same folder. Every copy of the effect does this for its own clip, so the effect is set up once and pasted onto the rest.
 
 1. Import the clips from where the `.gyroflow` files were written, and put them on a timeline. Do not move or rename the clips or the `.gyroflow` files afterwards.
@@ -78,11 +80,11 @@ Stabilisation settings (smoothness, zoom, horizon lock) can be changed per clip 
 
 ## How it works
 
-- `.GYR` → `.gcsv`: a port of the fpSup web converter, byte-identical output, accelerometer included for horizon lock.
-- Matching by timecode: the camera writes its running timecode into each log's `.json` when the log opens, and the Ninja stamps the same timecode on the clip. Clip start = (clip timecode − log timecode) / frame rate. A clip is placed this way when exactly one log holds it, with up to 0.5 s of the clip allowed outside the log; nothing is decoded.
-- Matching by motion, for everything else: each clip is decoded at 96×54 greyscale; its frame-to-frame change is cross-correlated with the gyro's angular rate over every position in every log. The best position is where the clip starts in the log.
-- Lens profile: the log opened at HDMI connect carries the monitor mode (3856×2170 @59.94). The tool sets the clip's dimensions and frame rate and moves the principal point to the centre. The rolling-shutter readout (`frame_readout_time`) is kept as the camera wrote it; it is not yet verified for HDMI RAW.
-- Gyroflow 1.6.3 reads autosync settings from the lens profile, not from the command line's `-s`, so they are written into the profile. The `.gyroflow` is exported with the gyro data embedded, so it needs no other file.
+- `.GYR` → `.gcsv`: a port of the fpSup web converter, accelerometer included for horizon lock.
+- Matching by timecode: the camera writes its running timecode into each log's `.json`, and the Ninja stamps the same timecode on the clip, so the clip's place in the log is the difference. Used when exactly one log holds the clip; nothing is decoded, and autosync then searches only ±0.25 s around it.
+- Matching by motion, for everything else: the clip is decoded small and its frame-to-frame change is cross-correlated with the gyro's angular rate over every position in every log.
+- Lens profile: the camera's profile for each take, with that take's focal length. The tool sets the dimensions and frame rate from the clip and puts the principal point at its centre. The rolling-shutter readout (`frame_readout_time`) is kept as the camera wrote it; it is not yet verified for HDMI RAW.
+- Gyroflow reads autosync settings from the lens profile, not from the command line's `-s`, so they are written into the profile.
 
 ## Build
 
