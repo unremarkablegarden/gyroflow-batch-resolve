@@ -17,6 +17,12 @@ The `.gyroflow` files are ordinary Gyroflow projects with the gyro data embedded
 
 There is no packaged release yet: build the app as described under [Build](#build). It has been used on macOS; the build also runs on Windows and Linux.
 
+### CinemaDNG recorded in the camera
+
+Clips recorded internally with the gcsv edition of fpSup Gyro need no recorder and no matching: each clip folder (`A001_461/`) already holds its frames, `A001_461.gcsv` and `A001_461.json`. Point both folder fields (or the video folder and `--gyro`) at the card or at a copy of it; every such folder is listed as one clip, named by its frame pattern (`A001_461_20260928_%06d.DNG`), and gets `A001_461_20260928_000001.gyroflow` beside the frames: named after the first frame, which is where the plugin looks for a sequence's project. ffmpeg is not used for these clips.
+
+Tested with eight 24p clips (3464x2308 and 3024x2010) from a SIGMA fp, Gyroflow 1.6.3 and DaVinci Resolve 21 on macOS.
+
 ## Shooting
 
 - Set the fp's timecode to **Free Run**. Each clip is then placed in its log by timecode: exact to a frame, and no camera motion needed. With Rec Run the tool falls back to matching by motion.
@@ -83,6 +89,7 @@ Stabilisation settings (smoothness, zoom, horizon lock) can be changed per clip 
 - `.GYR` → `.gcsv`: a port of the fpSup web converter, accelerometer included for horizon lock.
 - Matching by timecode: the camera writes its running timecode into each log's `.json`, and the Ninja stamps the same timecode on the clip, so the clip's place in the log is the difference. Used when exactly one log holds the clip; nothing is decoded, and autosync then searches only ±0.25 s around it.
 - Matching by motion, for everything else: the clip is decoded small and its frame-to-frame change is cross-correlated with the gyro's angular rate over every position in every log.
+- CinemaDNG clips: the frame rate and size come from the clip's `.json`, since an image sequence carries none that Gyroflow reads (it assumes 25 fps). Gyroflow's command line opens a sequence only from a project file, so the tool writes a temporary one with the frame pattern, the rate, the log and the lens profile, and Gyroflow syncs and exports from it. Gyroflow also wants a file with the pattern's literal name to exist, so an empty `…_%06d.DNG` is in the clip folder while Gyroflow runs and is removed afterwards.
 - Lens profile: the camera's profile for each take, with that take's focal length. The tool sets the dimensions and frame rate from the clip and puts the principal point at its centre. The rolling-shutter readout (`frame_readout_time`) is kept as the camera wrote it; it is not yet verified for HDMI RAW.
 - Gyroflow reads autosync settings from the lens profile, not from the command line's `-s`, so they are written into the profile.
 

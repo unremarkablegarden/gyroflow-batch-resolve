@@ -185,9 +185,9 @@ class App:
         values = (name,
                   f"{int(d // 60)}:{int(d % 60):02d}" if d else "",
                   clip.tc or "",
-                  clip.take.path.name if clip.take else "",
+                  clip.gyro.name if clip.gyro else "",
                   f"{clip.start_s:.2f} s" if clip.take else "",
-                  ("TC" if clip.method == "timecode" else f"{clip.corr:.2f}") if clip.take else "",
+                  ("TC" if clip.method == "timecode" else "own" if clip.gcsv else f"{clip.corr:.2f}") if clip.gyro else "",
                   clip.status)
         tag = ("failed" if clip.status.startswith(("failed", "cancelled")) else
                "warn" if "check sync" in clip.status else
@@ -336,7 +336,7 @@ class App:
             clips = pipeline.find_clips(video_dir, subfolders)
             self.clips = list(clips)
             post(f"{len(takes)} gyro takes, {len(clips)} clips")
-            if not takes:
+            if not takes and not any(c.gcsv for c in clips):
                 post("No .GYR + .json pairs in the gyro source.")
             for clip in clips:
                 self.events.put(("clip", clip))
@@ -376,7 +376,7 @@ class App:
     def generate(self) -> None:
         def work():
             t = self.find_tools()
-            todo = [c for c in self.clips if c.take is not None and c.status == "matched"]
+            todo = [c for c in self.clips if c.gyro is not None and c.status == "matched"]
             written = warned = failed = 0
             for i, clip in enumerate(todo, 1):
                 tools.check_cancel()
