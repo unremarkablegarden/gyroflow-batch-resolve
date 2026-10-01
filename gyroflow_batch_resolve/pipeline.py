@@ -8,6 +8,10 @@ take's .json (the recorder stamps the same timecode on the clip), otherwise by
 cross-correlating the video's frame-to-frame motion with the gyro's angular
 rate.
 
+A CinemaDNG clip recorded in the camera needs no matching: the gcsv edition of
+fpSup writes `<clip>.gcsv` + `<clip>.json` into the clip's folder, beside the
+frames, and the clip is that folder.
+
 The .gyroflow is written by the Gyroflow CLI with the gyro data embedded
 (--export-project 2), so it needs no other file. The Gyroflow OFX plugin in
 Resolve loads `<clip>.gyroflow` from the clip's folder by itself.
@@ -16,6 +20,7 @@ Resolve loads `<clip>.gyroflow` from the clip's folder by itself.
 from __future__ import annotations
 
 import json
+import re
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -26,6 +31,9 @@ import numpy as np
 from . import gyr, tools
 
 VIDEO_EXTS = {".mov", ".mp4", ".mxf"}
+
+# A CinemaDNG frame: A001_461_20260928_000001.DNG
+FRAME_RE = re.compile(r"(.*?)(\d+)(\.dng)", re.IGNORECASE)
 
 # Enough for global motion, and small enough that decoding is the cost.
 PROBE_W, PROBE_H = 96, 54
@@ -55,6 +63,14 @@ SYNC_SETTINGS = {
     "offset_method": 2,
     "pose_method": 0,
 }
+
+# For a CinemaDNG clip the settings go in the project file, which is read after
+# the lens profile and after the defaults saved by the Gyroflow app.  Those
+# defaults can have auto_sync_points on, which picked one point on the test
+# clip; five evenly spaced points came out 6 ms apart.  CinemaDNG has no
+# timecode and the log starts within half a second of the first frame, so the
+# +/- 1 s search holds it; at 5 s one of the five points locked 1.8 s off.
+SEQUENCE_SYNC_SETTINGS = dict(SYNC_SETTINGS, auto_sync_points=False)
 
 # Gyroflow 1.6.3's CLI never exits when a file fails to load (fixed upstream
 # after 1.6.3), so each clip gets a hard limit.
@@ -125,10 +141,22 @@ class Clip:
     method: str = ""            # "timecode" or "motion", once located
     tc: str | None = None       # the clip's start timecode, from the container
     status: str = "pending"
+    # A CinemaDNG clip: path is the frame pattern (A001_461_20260928_%06d.DNG),
+    # which is how Gyroflow names an image sequence, and its own log and lens
+    # profile lie beside the frames.
+    gcsv: Path | None = None
+    lens: Path | None = None
+    first_frame: int = 0
+    frames: int = 0
 
     @property
     def project(self) -> Path:
         return self.path.with_suffix(".gyroflow")
+
+    @property
+    def gyro(self) -> Path | None:
+        """The gyro log the clip was matched to, if any."""
+        return self.gcsv or (self.take.path if self.take else None)
 
 
 # What match() decided for a clip.
@@ -179,13 +207,46 @@ def tc_frames(tc: str, fps: float) -> int | None:
 
 
 def find_clips(folder: Path, subfolders: bool = True) -> list[Clip]:
-    found = folder.rglob("*") if subfolders else folder.glob("*")
-    return [Clip(p) for p in sorted(found)
-            if p.suffix.lower() in VIDEO_EXTS and not p.name.startswith("._")]
+    found = sorted(folder.rglob("*") if subfolders else folder.glob("*"))
+    clips = [Clip(p) for p in found
+             if p.suffix.lower() in VIDEO_EXTS and not p.name.startswith("._")]
+    for p in found:
+        if p.suffix.lower() == ".gcsv" and not p.name.startswith("._"):
+            clip = sequence_clip(p)
+            if clip:
+                clips.append(clip)
+    return sorted(clips, key=lambda c: c.path)
+
+
+def sequence_clip(gcsv: Path) -> Clip | None:
+    """The CinemaDNG clip in the folder of a camera-written .gcsv, if there is one."""
+    runs: dict[tuple[str, int, str], list[int]] = {}
+    for p in gcsv.parent.iterdir():
+        m = FRAME_RE.fullmatch(p.name)
+        if m and not p.name.startswith("._"):
+            runs.setdefault((m[1], len(m[2]), m[3]), []).append(int(m[2]))
+    if not runs:
+        return None
+    (prefix, digits, ext), numbers = max(runs.items(), key=lambda r: len(r[1]))
+    lens = gcsv.with_suffix(".json")
+    return Clip(gcsv.parent / f"{prefix}%0{digits}d{ext}", gcsv=gcsv, lens=lens if lens.exists() else None,
+                first_frame=min(numbers), frames=len(numbers))
+
+
+def probe_sequence(clip: Clip) -> None:
+    """Size and frame rate from the camera's lens profile: DNG frames carry no
+    rate that Gyroflow or ffprobe read, and an image sequence defaults to 25."""
+    if clip.lens is None:
+        raise ValueError(f"no {clip.gcsv.with_suffix('.json').name} beside {clip.gcsv.name}")
+    d = json.loads(clip.lens.read_text())
+    clip.width, clip.height, clip.fps = d["calib_dimension"]["w"], d["calib_dimension"]["h"], float(d["fps"])
+    clip.duration_s = clip.frames / clip.fps
 
 
 def probe_info(clip: Clip, t: Tools) -> None:
     """Size, frame rate and duration from the container. Fast: nothing is decoded."""
+    if clip.gcsv:
+        return probe_sequence(clip)
     info = json.loads(tools.run([t.ffprobe, "-v", "error", "-select_streams", "v:0", "-print_format", "json",
                                  "-show_entries",
                                  "stream=width,height,r_frame_rate:stream_tags=timecode"
@@ -291,6 +352,9 @@ def match(clip: Clip, takes: list[Take], t: Tools, redo: bool = False,
         return DONE
     step("reading")
     probe_info(clip, t)
+    if clip.gcsv:
+        clip.corr, clip.method = 1.0, "own log"
+        return MATCHED
     if locate_by_tc(clip, takes):
         return MATCHED
     # A log starts at the REC press and stops at the stop, so it is at least as
@@ -328,8 +392,56 @@ def lens_for(clip: Clip, source: Path) -> dict:
     return d
 
 
+def sequence_project(clip: Clip) -> dict:
+    """The project Gyroflow is started from for a CinemaDNG clip.
+
+    The CLI takes an image sequence only this way: given the frame pattern as
+    a video it reads it at 25 fps, and the rate cannot be set from the command
+    line.  video_info and output have to be there, or Gyroflow 1.6.3 stops with
+    "Invalid duration_ms 0" or a panic in cli.rs.  The exported project is
+    named after output_filename, less the suffix.
+
+    The output size and the rolling-shutter readout are set here because the
+    app sets them when a clip and a lens profile are opened by hand, and
+    Gyroflow copies whatever the project holds: with the 0x0 output it writes
+    otherwise, the plugin in Resolve shows a white frame and can crash."""
+    ms = clip.duration_s * 1000
+    lens = json.loads(clip.lens.read_text())
+    return {
+        "title": "Gyroflow data file", "version": 3,
+        "videofile": clip.path.as_uri(),
+        "image_sequence_start": clip.first_frame, "image_sequence_fps": clip.fps,
+        "video_info": {"width": clip.width, "height": clip.height, "rotation": 0.0, "num_frames": clip.frames,
+                       "fps": clip.fps, "duration_ms": ms, "vfr_fps": clip.fps, "vfr_duration_ms": ms},
+        "calibration_data": lens,
+        "gyro_source": {"filepath": clip.gcsv.as_uri()},
+        "offsets": {},
+        "synchronization": SEQUENCE_SYNC_SETTINGS,
+        "stabilization": {"frame_readout_time": lens.get("frame_readout_time", 0.0),
+                          "frame_readout_direction": lens.get("frame_readout_direction", "TopToBottom")},
+        "output": {"output_filename": f"{clip.path.stem}_stabilized.mp4",
+                   "output_folder": clip.path.parent.as_uri() + "/",
+                   "output_width": clip.width, "output_height": clip.height},
+    }
+
+
 def generate(clip: Clip, t: Tools) -> list[float]:
     """Write clip.project. Returns the autosync offsets in ms."""
+    if clip.gcsv:
+        # Gyroflow checks that a file with the pattern's own name exists before
+        # it opens the sequence; an empty one is enough.
+        placeholder = None if clip.path.exists() else clip.path
+        with tempfile.TemporaryDirectory() as tmp:
+            start = Path(tmp) / f"{clip.gcsv.stem}.gyroflow"
+            start.write_text(json.dumps(sequence_project(clip), indent=1))
+            try:
+                if placeholder:
+                    placeholder.touch()
+                res = tools.run([t.gyroflow, start, "--export-project", "2", "-f"], timeout=GYROFLOW_TIMEOUT_S)
+            finally:
+                if placeholder:
+                    placeholder.unlink(missing_ok=True)
+        return _offsets(clip, res)
     with tempfile.TemporaryDirectory() as tmp:
         gcsv = Path(tmp) / f"{clip.path.stem}.gcsv"
         lens = Path(tmp) / f"{clip.path.stem}.json"
@@ -337,6 +449,11 @@ def generate(clip: Clip, t: Tools) -> list[float]:
         lens.write_text(json.dumps(lens_for(clip, clip.take.lens), indent=1))
         res = tools.run([t.gyroflow, clip.path, lens, "-g", gcsv, "--export-project", "2", "-f"],
                         timeout=GYROFLOW_TIMEOUT_S)
+    return _offsets(clip, res)
+
+
+def _offsets(clip: Clip, res) -> list[float]:
+    """The sync offsets Gyroflow wrote into clip.project; ToolError if it did not."""
     out = (res.stdout + res.stderr).decode(errors="replace")
     if res.returncode != 0 or not clip.project.exists():
         errors = [l for l in out.splitlines() if "ERROR" in l and "bookmark" not in l]

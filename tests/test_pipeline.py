@@ -159,3 +159,52 @@ def test_timecode_placement_narrows_the_autosync_search(tmp_path):
     clip.method = "timecode"
     assert pipeline.lens_for(clip, src)["sync_settings"]["search_size"] == pipeline.TC_SEARCH_S
     assert pipeline.SYNC_SETTINGS["search_size"] == 1.0      # the shared default is untouched
+
+
+def cdng_clip(folder, frames=3, lens=True):
+    """A CinemaDNG clip folder as the gcsv edition of fpSup leaves it."""
+    folder.mkdir(parents=True)
+    for i in range(1, frames + 1):
+        (folder / f"{folder.name}_20260928_{i:06d}.DNG").touch()
+    (folder / f"{folder.name}_20260928.WAV").touch()
+    (folder / f"{folder.name}.gcsv").touch()
+    if lens:
+        (folder / f"{folder.name}.json").write_text(json.dumps(
+            {"calib_dimension": {"w": 3464, "h": 2308}, "fps": 24.0, "frame_readout_time": 24.982}))
+
+
+def test_find_clips_takes_a_cdng_folder_as_one_clip(tmp_path):
+    cdng_clip(tmp_path / "A001_461")
+    (tmp_path / "B.mov").touch()
+    (tmp_path / "stray.gcsv").touch()       # a log with no frames beside it is not a clip
+    clips = pipeline.find_clips(tmp_path)
+    assert [c.path.relative_to(tmp_path).as_posix() for c in clips] == ["A001_461/A001_461_20260928_%06d.DNG", "B.mov"]
+    seq = clips[0]
+    assert seq.gcsv.name == "A001_461.gcsv" and seq.lens.name == "A001_461.json"
+    assert (seq.first_frame, seq.frames) == (1, 3)
+    assert seq.project.name == "A001_461_20260928_%06d.gyroflow"
+    assert pipeline.find_clips(tmp_path, subfolders=False)[0].path.name == "B.mov"
+
+
+def test_cdng_clip_is_matched_to_its_own_log(tmp_path):
+    cdng_clip(tmp_path / "A001_461", frames=48)
+    clip, = pipeline.find_clips(tmp_path)
+    assert pipeline.match(clip, [], None) == pipeline.MATCHED
+    assert (clip.width, clip.height, clip.fps, clip.duration_s) == (3464, 2308, 24.0, 2.0)
+    project = pipeline.sequence_project(clip)
+    assert project["videofile"].endswith("/A001_461/A001_461_20260928_%2506d.DNG")
+    assert project["image_sequence_fps"] == 24.0 and project["image_sequence_start"] == 1
+    assert project["video_info"]["duration_ms"] == 2000.0
+    assert project["synchronization"]["auto_sync_points"] is False
+    assert project["output"]["output_filename"] == "A001_461_20260928_%06d_stabilized.mp4"
+    assert (project["output"]["output_width"], project["output"]["output_height"]) == (3464, 2308)
+    assert project["stabilization"]["frame_readout_time"] == 24.982
+
+
+def test_cdng_clip_without_a_lens_profile_fails(tmp_path):
+    import pytest
+
+    cdng_clip(tmp_path / "A001_461", lens=False)
+    clip, = pipeline.find_clips(tmp_path)
+    with pytest.raises(ValueError, match="no A001_461.json"):
+        pipeline.match(clip, [], None)
