@@ -182,7 +182,7 @@ def test_find_clips_takes_a_cdng_folder_as_one_clip(tmp_path):
     seq = clips[0]
     assert seq.gcsv.name == "A001_461.gcsv" and seq.lens.name == "A001_461.json"
     assert (seq.first_frame, seq.frames) == (1, 3)
-    assert seq.project.name == "A001_461_20260928_%06d.gyroflow"
+    assert seq.project.name == "A001_461_20260928_000001.gyroflow"
     assert pipeline.find_clips(tmp_path, subfolders=False)[0].path.name == "B.mov"
 
 
@@ -196,7 +196,7 @@ def test_cdng_clip_is_matched_to_its_own_log(tmp_path):
     assert project["image_sequence_fps"] == 24.0 and project["image_sequence_start"] == 1
     assert project["video_info"]["duration_ms"] == 2000.0
     assert project["synchronization"]["auto_sync_points"] is False
-    assert project["output"]["output_filename"] == "A001_461_20260928_%06d_stabilized.mp4"
+    assert project["output"]["output_filename"] == "A001_461_20260928_000001_stabilized.mp4"
     assert (project["output"]["output_width"], project["output"]["output_height"]) == (3464, 2308)
     assert project["stabilization"]["frame_readout_time"] == 24.982
 

@@ -151,6 +151,12 @@ class Clip:
 
     @property
     def project(self) -> Path:
+        if self.gcsv:
+            # Named after the first frame: the plugin looks for a project that
+            # starts with the name of the file the editor gives it, and for a
+            # sequence it reduces Resolve's [000001-000366] to the first number.
+            first = re.sub(r"%0(\d+)d", lambda m: f"{self.first_frame:0{int(m[1])}d}", self.path.name)
+            return self.path.with_name(first).with_suffix(".gyroflow")
         return self.path.with_suffix(".gyroflow")
 
     @property
@@ -419,7 +425,7 @@ def sequence_project(clip: Clip) -> dict:
         "synchronization": SEQUENCE_SYNC_SETTINGS,
         "stabilization": {"frame_readout_time": lens.get("frame_readout_time", 0.0),
                           "frame_readout_direction": lens.get("frame_readout_direction", "TopToBottom")},
-        "output": {"output_filename": f"{clip.path.stem}_stabilized.mp4",
+        "output": {"output_filename": f"{clip.project.stem}_stabilized.mp4",
                    "output_folder": clip.path.parent.as_uri() + "/",
                    "output_width": clip.width, "output_height": clip.height},
     }

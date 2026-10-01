@@ -19,9 +19,9 @@ There is no packaged release yet: build the app as described under [Build](#buil
 
 ### CinemaDNG recorded in the camera
 
-Clips recorded internally with the gcsv edition of fpSup Gyro need no recorder and no matching: each clip folder (`A001_461/`) already holds its frames, `A001_461.gcsv` and `A001_461.json`. Point both folder fields (or the video folder and `--gyro`) at the card or at a copy of it; every such folder is listed as one clip, named by its frame pattern (`A001_461_20260928_%06d.DNG`), and gets `A001_461_20260928_%06d.gyroflow` beside the frames, the name the Gyroflow app gives a sequence. ffmpeg is not used for these clips.
+Clips recorded internally with the gcsv edition of fpSup Gyro need no recorder and no matching: each clip folder (`A001_461/`) already holds its frames, `A001_461.gcsv` and `A001_461.json`. Point both folder fields (or the video folder and `--gyro`) at the card or at a copy of it; every such folder is listed as one clip, named by its frame pattern (`A001_461_20260928_%06d.DNG`), and gets `A001_461_20260928_000001.gyroflow` beside the frames: named after the first frame, which is where the plugin looks for a sequence's project. ffmpeg is not used for these clips.
 
-Tested with one 3464x2308 24p clip from a SIGMA fp and Gyroflow 1.6.3 on macOS.
+Tested with eight 24p clips (3464x2308 and 3024x2010) from a SIGMA fp, Gyroflow 1.6.3 and DaVinci Resolve 21 on macOS.
 
 ## Shooting
 
