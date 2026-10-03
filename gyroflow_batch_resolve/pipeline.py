@@ -8,6 +8,11 @@ take's .json (the recorder stamps the same timecode on the clip), otherwise by
 cross-correlating the video's frame-to-frame motion with the gyro's angular
 rate.
 
+When a clip's timecode falls inside more than one take (the timecode carries
+no date, so takes from different days can overlap), the file dates pick the
+take, and failing that a few seconds of the clip are decoded and compared with
+each candidate at its timecode position.
+
 The .gyroflow is written by the Gyroflow CLI with the gyro data embedded
 (--export-project 2), so it needs no other file. The Gyroflow OFX plugin in
 Resolve loads `<clip>.gyroflow` from the clip's folder by itself.
@@ -18,6 +23,7 @@ from __future__ import annotations
 import json
 import tempfile
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
@@ -42,6 +48,14 @@ TC_SLACK_S = 0.5
 # timecode-placed clips by -11 and +26 ms, inside one frame (42 ms at 24p);
 # 0.25 s leaves six frames of room and keeps autosync off unrelated motion.
 TC_SEARCH_S = 0.25
+# Timecode has no date. When it puts a clip inside several takes, the take
+# whose .json mtime (the log opening, camera clock) is nearest the clip's
+# creation_time (recorder clock) is used if it is this much nearer than every
+# other. The two clocks were 45-75 min apart on the test rig.
+DATE_MARGIN_S = 12 * 3600
+# Seconds decoded from the middle of the clip to choose between takes that
+# timecode and dates leave tied: 6 s of 4K ProRes RAW decodes in about 10 s.
+SAMPLE_S = 6.0
 
 # Gyroflow 1.6.3 reads autosync settings from the lens profile only; the CLI's
 # -s is not consulted. search_size is +/- seconds around the located start.
@@ -109,6 +123,7 @@ class Take:
     lens: Path
     cap: gyr.Capture
     tc: str | None = None       # the camera's timecode when the log opened
+    opened: float | None = None  # .json mtime, epoch s: when the log opened
 
 
 @dataclass
@@ -124,6 +139,7 @@ class Clip:
     corr: float = 0.0
     method: str = ""            # "timecode" or "motion", once located
     tc: str | None = None       # the clip's start timecode, from the container
+    created: float | None = None  # the container's creation_time, epoch s
     status: str = "pending"
 
     @property
@@ -154,7 +170,7 @@ def find_takes(folder: Path, log: Callable[[str], None] = print) -> list[Take]:
             log(f"skip {p.name}: no {lens.name} beside it")
             continue
         try:
-            takes.append(Take(p, lens, gyr.read(p), lens_timecode(lens)))
+            takes.append(Take(p, lens, gyr.read(p), lens_timecode(lens), lens.stat().st_mtime))
         except ValueError as e:
             log(f"skip {p.name}: {e}")
     return takes
@@ -189,7 +205,7 @@ def probe_info(clip: Clip, t: Tools) -> None:
     info = json.loads(tools.run([t.ffprobe, "-v", "error", "-select_streams", "v:0", "-print_format", "json",
                                  "-show_entries",
                                  "stream=width,height,r_frame_rate:stream_tags=timecode"
-                                 ":format=duration:format_tags=timecode",
+                                 ":format=duration:format_tags=timecode,creation_time",
                                  clip.path]).stdout)
     stream = info["streams"][0]
     num, den = stream["r_frame_rate"].split("/")
@@ -197,17 +213,29 @@ def probe_info(clip: Clip, t: Tools) -> None:
     clip.duration_s = float(info["format"]["duration"])
     clip.tc = (stream.get("tags", {}).get("timecode")
                or info["format"].get("tags", {}).get("timecode"))
+    clip.created = parse_time(info["format"].get("tags", {}).get("creation_time"))
 
 
-def probe_motion(clip: Clip, t: Tools) -> None:
-    """Decode the clip small and measure the change between frames. Slow."""
-    res = tools.run([t.ffmpeg, "-v", "error", "-i", clip.path,
+def parse_time(iso: str | None) -> float | None:
+    try:
+        # Python 3.10 does not accept a trailing "Z".
+        return datetime.fromisoformat(iso.replace("Z", "+00:00")).timestamp()
+    except (AttributeError, ValueError):
+        return None
+
+
+def probe_motion(clip: Clip, t: Tools, start_s: float = 0.0, length_s: float | None = None) -> np.ndarray:
+    """Decode the clip small and measure the change between frames. Slow: the
+    ProRes RAW decoder is single-threaded, about 1.7 s per second of 4K on an
+    M1 Pro. start_s and length_s limit the decode to part of the clip."""
+    span = ["-ss", f"{start_s:.6f}"] + (["-t", f"{length_s:.6f}"] if length_s else [])
+    res = tools.run([t.ffmpeg, "-v", "error", *span, "-i", clip.path,
                      "-vf", f"scale={PROBE_W}:{PROBE_H},format=gray", "-f", "rawvideo", "-"])
     if res.returncode != 0:
         raise tools.ToolError(f"ffmpeg could not decode {clip.path.name}: {res.stderr.decode(errors='replace')[:300]}")
     frames = np.frombuffer(res.stdout, dtype=np.uint8)
     frames = frames[: len(frames) // (PROBE_W * PROBE_H) * PROBE_W * PROBE_H].reshape(-1, PROBE_W * PROBE_H)
-    clip.motion = np.abs(np.diff(frames.astype(np.int16), axis=0)).mean(axis=1)
+    return np.abs(np.diff(frames.astype(np.int16), axis=0)).mean(axis=1)
 
 
 def rate_per_frame(cap: gyr.Capture, fps: float) -> np.ndarray:
@@ -219,18 +247,19 @@ def rate_per_frame(cap: gyr.Capture, fps: float) -> np.ndarray:
     return sums / np.diff(edges)
 
 
-def locate_by_tc(clip: Clip, takes: list[Take]) -> bool:
-    """Place the clip from timecodes alone.  True if exactly one take holds it.
+def tc_hits(clip: Clip, takes: list[Take]) -> list[tuple[Take, float]]:
+    """The takes whose timecode span holds the clip, with the clip's start in
+    each, in seconds.
 
     Needs the camera on Free Run: the take's timecode and the clip's then come
     from one running clock, and one frame of timecode is one frame of time.
-    With Rec Run the timecode stands still between takes, several takes can
-    claim the clip, and it is left to motion matching."""
+    With Rec Run the timecode stands still between takes and several takes can
+    claim the clip."""
     if not clip.tc or not clip.fps:
-        return False
+        return []
     c = tc_frames(clip.tc, clip.fps)
     if c is None:
-        return False
+        return []
     day = 24 * 3600 * round(clip.fps)
     hits = []
     for take in takes:
@@ -243,13 +272,67 @@ def locate_by_tc(clip: Clip, takes: list[Take]) -> bool:
         off = d / clip.fps
         if -TC_SLACK_S <= off and off + clip.duration_s <= take.cap.duration_s + TC_SLACK_S:
             hits.append((take, off))
-    if len(hits) != 1:
-        return False
-    clip.take, off = hits[0]
+    return by_date(clip, hits) if len(hits) > 1 else hits
+
+
+def by_date(clip: Clip, hits: list[tuple[Take, float]]) -> list[tuple[Take, float]]:
+    """The one hit whose log opened nearest the clip's creation time, if it is
+    DATE_MARGIN_S nearer than the rest; otherwise all of them."""
+    if clip.created is None or any(take.opened is None for take, _ in hits):
+        return hits
+    ranked = sorted(hits, key=lambda h: abs(clip.created - (h[0].opened + h[1])))
+    gap = [abs(clip.created - (take.opened + off)) for take, off in ranked[:2]]
+    return ranked[:1] if gap[1] - gap[0] >= DATE_MARGIN_S else hits
+
+
+def place_by_tc(clip: Clip, take: Take, off: float, corr: float = 1.0) -> None:
     # A negative start (the recorder started before the log opened) is kept:
     # gyr.gcsv pads the gap, so the clip and the gyro stay aligned.
-    clip.start_s, clip.corr, clip.method = off, 1.0, "timecode"
+    clip.take, clip.start_s, clip.corr, clip.method = take, off, corr, "timecode"
+
+
+def locate_by_tc(clip: Clip, takes: list[Take]) -> bool:
+    """Place the clip from timecodes alone.  True if exactly one take holds it."""
+    hits = tc_hits(clip, takes)
+    if len(hits) != 1:
+        return False
+    place_by_tc(clip, *hits[0])
     return True
+
+
+def choose_by_sample(clip: Clip, hits: list[tuple[Take, float]], motion: np.ndarray, sample_s: float) -> bool:
+    """Place the clip in the hit whose gyro best follows `motion`, the motion
+    of the clip from sample_s on, searched within TC_SLACK_S of the timecode
+    position. True if the best correlation reaches MIN_CORR."""
+    slack = round(TC_SLACK_S * clip.fps)
+    best = None
+    for take, off in hits:
+        at = round((off + sample_s) * clip.fps)
+        _, r = best_fit(motion, rate_per_frame(take.cap, clip.fps), at - slack, at + slack)
+        if best is None or r > best[2]:
+            best = (take, off, r)
+    if best is None or best[2] < MIN_CORR:
+        return False
+    place_by_tc(clip, *best)
+    return True
+
+
+def best_fit(m: np.ndarray, rate: np.ndarray, first: int, last: int) -> tuple[int, float]:
+    """The start frame s in [first, last] (clamped to the take) where the
+    motion m best correlates with rate, and the correlation; (0, 0.0) if none.
+    m[i] pairs with rate[s + 1 + i]; see locate()."""
+    n = len(m)
+    first, last = max(first, 0), min(last, len(rate) - n - 1)
+    if n < 2 or m.std() == 0 or last < first:
+        return 0, 0.0
+    mz = (m - m.mean()) / m.std()
+    win = np.lib.stride_tricks.sliding_window_view(rate[first + 1:last + 1 + n], n)
+    sd = win.std(axis=1)
+    valid = sd > 0
+    r = np.zeros(len(win))
+    r[valid] = ((win[valid] - win[valid].mean(axis=1, keepdims=True)) @ mz) / (n * sd[valid])
+    best = int(r.argmax())
+    return first + best, float(r[best])
 
 
 def locate(clip: Clip, takes: list[Take]) -> None:
@@ -261,22 +344,11 @@ def locate(clip: Clip, takes: list[Take]) -> None:
     frame interval i+1.
     """
     m = clip.motion
-    n = len(m)
-    if n < 2 or m.std() == 0:
-        return
-    mz = (m - m.mean()) / m.std()
     for take in takes:
         rate = rate_per_frame(take.cap, clip.fps)
-        if len(rate) < n + 1:
-            continue
-        win = np.lib.stride_tricks.sliding_window_view(rate[1:], n)
-        sd = win.std(axis=1)
-        valid = sd > 0
-        r = np.zeros(len(win))
-        r[valid] = ((win[valid] - win[valid].mean(axis=1, keepdims=True)) @ mz) / (n * sd[valid])
-        best = int(r.argmax())
-        if r[best] > clip.corr:
-            clip.take, clip.start_s, clip.corr = take, best / clip.fps, float(r[best])
+        best, r = best_fit(m, rate, 0, len(rate))
+        if r > clip.corr:
+            clip.take, clip.start_s, clip.corr = take, best / clip.fps, r
             clip.method = "motion"
 
 
@@ -291,14 +363,24 @@ def match(clip: Clip, takes: list[Take], t: Tools, redo: bool = False,
         return DONE
     step("reading")
     probe_info(clip, t)
-    if locate_by_tc(clip, takes):
+    hits = tc_hits(clip, takes)
+    if len(hits) == 1:
+        place_by_tc(clip, *hits[0])
         return MATCHED
+    if hits:
+        # Start on a whole frame, so the sample's first frame is known.
+        sample_s = max(0, round((clip.duration_s - SAMPLE_S) / 2 * clip.fps)) / clip.fps
+        step("decoding a sample")
+        motion = probe_motion(clip, t, sample_s, SAMPLE_S)
+        step("matching")
+        if choose_by_sample(clip, hits, motion, sample_s):
+            return MATCHED
     # A log starts at the REC press and stops at the stop, so it is at least as
     # long as any clip inside it. 1 s of slack for container rounding.
     if not takes or clip.duration_s > max(k.cap.duration_s for k in takes) + 1.0:
         return NO_GYRO
     step("decoding")
-    probe_motion(clip, t)
+    clip.motion = probe_motion(clip, t)
     step("matching")
     locate(clip, takes)
     if clip.take is None or clip.corr < MIN_CORR:

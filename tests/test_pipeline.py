@@ -159,3 +159,43 @@ def test_timecode_placement_narrows_the_autosync_search(tmp_path):
     clip.method = "timecode"
     assert pipeline.lens_for(clip, src)["sync_settings"]["search_size"] == pipeline.TC_SEARCH_S
     assert pipeline.SYNC_SETTINGS["search_size"] == 1.0      # the shared default is untouched
+
+
+def test_dates_pick_between_takes_from_different_days():
+    # Free Run timecode from two days: the long take from 1 Oct also spans the
+    # clip's timecode. The recorder clock is 45 min off the camera's.
+    old = tc_take(861.0, "00:27:19:06")
+    new = tc_take(213.3, "00:36:23:15")
+    old.opened, new.opened = 1_790_000_000.0, 1_790_000_000.0 + 2.6 * 86400
+    clip = pipeline.Clip(Path("T002.mov"), 3840, 2160, 24.0, duration_s=94.5, tc="00:37:24:12")
+    clip.created = new.opened + 60.875 + 45 * 60
+    assert pipeline.locate_by_tc(clip, [old, new])
+    assert clip.take is new and abs(clip.start_s - 60.875) < 1e-9
+    # Same day: dates cannot tell them apart.
+    old.opened = new.opened - 3600
+    assert len(pipeline.tc_hits(clip, [old, new])) == 2
+
+
+def test_a_sample_picks_between_tied_takes():
+    rng = np.random.default_rng(2)
+    fps, per_frame = 24.0, 104
+
+    def take(rate):
+        gyro = np.stack([rate * 1000, np.zeros_like(rate), np.zeros_like(rate)], 1).astype(np.int16)
+        cap = gyr.Capture("v8", "T", 1 / fps / per_frame, 0.000137923, 1 / 1024, "xyz",
+                          gyro, np.zeros((0, 3), np.int16), np.zeros(0, np.int64))
+        return pipeline.Take(Path("T.GYR"), Path("T.json"), cap)
+
+    a = take(np.abs(rng.normal(0, 1, 2000)).repeat(per_frame))
+    b_rate = np.abs(rng.normal(0, 1, 2000))
+    b = take(b_rate.repeat(per_frame))
+    clip = pipeline.Clip(Path("c.mov"), fps=fps)
+    off, sample_s = 10.0, 20.0
+    # The sample is 2 frames later than timecode says, inside TC_SLACK_S.
+    s = round((off + sample_s) * fps) + 2
+    motion = b_rate[s + 1:s + 145] * 2.0 + 1.0
+    assert pipeline.choose_by_sample(clip, [(a, off), (b, off)], motion, sample_s)
+    assert clip.take is b and clip.start_s == off and clip.method == "timecode" and clip.corr > 0.99
+    # Static footage decides nothing.
+    clip = pipeline.Clip(Path("c.mov"), fps=fps)
+    assert not pipeline.choose_by_sample(clip, [(a, off), (b, off)], np.ones(144), sample_s)
