@@ -135,6 +135,21 @@ def test_locate_by_tc_places_a_clip_inside_a_session_log():
     assert abs(clip.start_s - 12.5) < 1e-9
 
 
+def test_locate_by_tc_places_a_clip_that_started_before_its_log():
+    # The log opened 2.67 s after the recorder started and covers the rest.
+    log = tc_take(1253.85, "00:13:47:22")
+    clip = pipeline.Clip(Path("c.mov"), 3840, 2160, 24.0, duration_s=1256.58, tc="00:13:45:06")
+    assert pipeline.locate_by_tc(clip, [log])
+    assert abs(clip.start_s + 64 / 24) < 1e-9
+    assert pipeline.gap_note(clip) == "first 2.7 s without gyro"
+
+
+def test_locate_by_tc_rejects_a_log_that_covers_too_little():
+    log = tc_take(5.0, "00:00:10:00")
+    clip = pipeline.Clip(Path("c.mov"), 3840, 2160, 24.0, duration_s=10.0, tc="00:00:08:00")
+    assert not pipeline.locate_by_tc(clip, [log])
+
+
 def test_locate_by_tc_leaves_ambiguous_or_missing_timecodes_to_motion():
     # Rec Run: two logs opened at the same stopped timecode.
     a, b = tc_take(10.0, "01:00:00:00"), tc_take(10.0, "01:00:00:00")

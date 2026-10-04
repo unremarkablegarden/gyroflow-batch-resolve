@@ -57,6 +57,9 @@ def main(argv: list[str] | None = None) -> int:
             continue
         how = "timecode" if clip.method == "timecode" else f"correlation {clip.corr:.2f}"
         print(f"{clip.path.name}: {clip.take.path.name} from {clip.start_s:.2f} s ({how})")
+        gap = pipeline.gap_note(clip)
+        if gap:
+            print(f"     {gap}")
         if a.dry_run:
             continue
         print("     syncing in Gyroflow…", flush=True)

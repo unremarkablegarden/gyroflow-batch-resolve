@@ -190,7 +190,7 @@ class App:
                   ("TC" if clip.method == "timecode" else f"{clip.corr:.2f}") if clip.take else "",
                   clip.status)
         tag = ("failed" if clip.status.startswith(("failed", "cancelled")) else
-               "warn" if "check sync" in clip.status else
+               "warn" if "check sync" in clip.status or "without gyro" in clip.status else
                "skipped" if clip.status.startswith(("skipped", "already")) else "")
         iid = str(clip.path)
         if self.table.exists(iid):
@@ -401,6 +401,9 @@ class App:
                     if warning:
                         clip.status = f"written, check sync: {warning}"
                         warned += 1
+                    gap = pipeline.gap_note(clip)
+                    if gap:
+                        clip.status += f", {gap}"
                     written += 1
                 self.events.put(("clip", clip))
             return (f"{written} .gyroflow files written next to their clips"

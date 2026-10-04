@@ -44,6 +44,10 @@ MIN_CORR = 0.5
 # recorder starts a few frames later or earlier, and a take log can end a few
 # frames before its clip; this much of the clip may fall outside the log.
 TC_SLACK_S = 0.5
+# A clip that runs further outside its log is still placed by timecode if the
+# log covers this fraction of it; the uncovered part gets zero rotation.
+# Measured: one log opened 2.67 s after its 1257 s clip started.
+TC_MIN_COVER = 0.9
 # Autosync's search around a timecode placement.  Measured: autosync moved
 # timecode-placed clips by -11 and +26 ms, inside one frame (42 ms at 24p);
 # 0.25 s leaves six frames of room and keeps autosync off unrelated motion.
@@ -270,7 +274,9 @@ def tc_hits(clip: Clip, takes: list[Take]) -> list[tuple[Take, float]]:
         if d > day // 2:
             d -= day                    # the clip starts before the log (or past midnight)
         off = d / clip.fps
-        if -TC_SLACK_S <= off and off + clip.duration_s <= take.cap.duration_s + TC_SLACK_S:
+        inside = -TC_SLACK_S <= off and off + clip.duration_s <= take.cap.duration_s + TC_SLACK_S
+        covered = min(off + clip.duration_s, take.cap.duration_s) - max(off, 0.0)
+        if inside or covered >= TC_MIN_COVER * clip.duration_s:
             hits.append((take, off))
     return by_date(clip, hits) if len(hits) > 1 else hits
 
@@ -283,6 +289,22 @@ def by_date(clip: Clip, hits: list[tuple[Take, float]]) -> list[tuple[Take, floa
     ranked = sorted(hits, key=lambda h: abs(clip.created - (h[0].opened + h[1])))
     gap = [abs(clip.created - (take.opened + off)) for take, off in ranked[:2]]
     return ranked[:1] if gap[1] - gap[0] >= DATE_MARGIN_S else hits
+
+
+def uncovered_s(clip: Clip) -> tuple[float, float]:
+    """Seconds at the clip's start and end that its take's log does not cover."""
+    if clip.take is None:
+        return 0.0, 0.0
+    return (max(0.0, -clip.start_s),
+            max(0.0, clip.start_s + clip.duration_s - clip.take.cap.duration_s))
+
+
+def gap_note(clip: Clip) -> str | None:
+    """A note for gaps in gyro coverage longer than TC_SLACK_S, else None."""
+    head, tail = uncovered_s(clip)
+    parts = ([f"first {head:.1f} s"] if head > TC_SLACK_S else []) + \
+            ([f"last {tail:.1f} s"] if tail > TC_SLACK_S else [])
+    return " and ".join(parts) + " without gyro" if parts else None
 
 
 def place_by_tc(clip: Clip, take: Take, off: float, corr: float = 1.0) -> None:
