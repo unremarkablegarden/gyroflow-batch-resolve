@@ -15,7 +15,7 @@ The `.gyroflow` files are ordinary Gyroflow projects with the gyro data embedded
 - The Gyroflow plugin for your editor, installed from Gyroflow (Video editor plugins).
 - ffmpeg and ffprobe 8.0 or newer (the first with a ProRes RAW decoder). macOS: `brew install ffmpeg`.
 
-There is no packaged release yet: build the app as described under [Build](#build). It has been used on macOS; the build also runs on Windows and Linux.
+Download the app for macOS, Windows or Linux from [Releases](https://github.com/unremarkablegarden/gyroflow-batch-resolve/releases), or build it as described under [Build](#build). It has been used on macOS; the Windows and Linux builds are untested.
 
 ## Shooting
 
